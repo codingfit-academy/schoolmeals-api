@@ -17,6 +17,7 @@ DB 접근:
   아래 include_router 예시처럼 등록하세요.
 ─────────────────────────────────────────────────────────────
 """
+import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -29,6 +30,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .database import Base, engine, get_db
 from .models import Item
+from .routers import meals
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+# httpx는 요청 URL을 그대로 로그에 남겨 API 키(KEY 쿼리파라미터)가 노출되므로 레벨을 낮춘다
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 # ── 앱 시작 시 테이블 자동 생성 ───────────────────────────────
@@ -118,6 +127,5 @@ async def delete_item(item_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
 
-# ── 라우터 추가 예시 ───────────────────────────────────────────
-# from .routers import posts
-# app.include_router(posts.router, prefix="/posts", tags=["posts"])
+# ── 라우터 등록 ───────────────────────────────────────────────
+app.include_router(meals.router, tags=["meals"])

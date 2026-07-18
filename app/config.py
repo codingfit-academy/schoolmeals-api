@@ -16,6 +16,10 @@ env 주입 경로:
 """
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 class Settings:
     port: int = int(os.getenv("PORT", "8000"))
@@ -34,6 +38,10 @@ class Settings:
             f"{self.db_user}:{self.db_pass}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    # ── NEIS 나이스 교육정보 개방포털 Open API ────────────────
+    neis_api_key: str = os.getenv("NEIS_API_KEY", "")
+    neis_base_url: str = "https://open.neis.go.kr/hub"
 
     # ── 프론트에 내려줄 공개 값 (GET /config) ─────────────────
     #    ⚠ 브라우저에 노출됩니다. 공개해도 되는 값만 넣으세요.
