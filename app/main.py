@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .database import Base, engine, get_db
 from .models import Item
-from .routers import meals
+from .routers import meals, schools
 
 logging.basicConfig(
     level=logging.INFO,
@@ -129,3 +129,4 @@ async def delete_item(item_id: int, db: AsyncSession = Depends(get_db)):
 
 # ── 라우터 등록 ───────────────────────────────────────────────
 app.include_router(meals.router, tags=["meals"])
+app.include_router(schools.router, tags=["schools"])

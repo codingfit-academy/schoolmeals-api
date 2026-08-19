@@ -22,6 +22,7 @@ async def get_meals(
     mlsv_ymd: str | None = Query(None, description="급식일자 (YYYYMMDD)"),
     mlsv_from_ymd: str | None = Query(None, description="조회 시작일자 (YYYYMMDD)"),
     mlsv_to_ymd: str | None = Query(None, description="조회 종료일자 (YYYYMMDD)"),
+    mmeal_sc_code: str | None = Query(None, description="식사코드 (1=조식, 2=중식, 3=석식)"),
 ):
     try:
         data = await neis.fetch_meal_info(
@@ -30,6 +31,7 @@ async def get_meals(
             mlsv_ymd=mlsv_ymd,
             mlsv_from_ymd=mlsv_from_ymd,
             mlsv_to_ymd=mlsv_to_ymd,
+            mmeal_sc_code=mmeal_sc_code,
         )
     except httpx.HTTPStatusError as e:
         logger.exception("NEIS API 호출 실패")
