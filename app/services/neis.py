@@ -94,7 +94,7 @@ async def fetch_all_schools(atpt_ofcdc_sc_code: str, max_pages: int = 10) -> lis
     schools: list[dict] = []
     for p_index in range(1, max_pages + 1):
         data = await fetch_school_info(atpt_ofcdc_sc_code, p_index=p_index, p_size=p_size)
-        rows = _extract_rows(data, SCHOOL_ENDPOINT)
+        rows = extract_rows(data, SCHOOL_ENDPOINT)
         if not rows:
             break
         schools.extend(rows)
@@ -105,7 +105,7 @@ async def fetch_all_schools(atpt_ofcdc_sc_code: str, max_pages: int = 10) -> lis
     return schools
 
 
-def _extract_rows(data: dict, key: str) -> list[dict]:
+def extract_rows(data: dict, key: str) -> list[dict]:
     """NEIS 응답 [{head:...}, {row:[...]}] 형태에서 row 리스트만 꺼냅니다.
     데이터가 없으면 head 없이 RESULT 만 오므로 그 경우 빈 리스트를 반환합니다."""
     section = data.get(key)

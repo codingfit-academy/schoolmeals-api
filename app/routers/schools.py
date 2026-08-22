@@ -6,10 +6,12 @@ NEIS 학교기본정보 API를 호출해 프론트에서 바로 쓰기 좋은 �
 """
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..services import neis
+from ..database import get_db
+from ..services import neis, school_ai
 
 logger = logging.getLogger("neis")
 
@@ -45,3 +47,22 @@ async def get_schools(
         }
         for row in rows
     ]
+
+
+@router.get("/schools/{office_code}/{school_code}/ai")
+async def get_school_ai_intro(
+    office_code: str,
+    school_code: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """학교 페이지 진입 시 AI 소개를 반환합니다.
+
+    학교당 AI는 최초 1회만 호출되고, 이후 요청은 DB에 캐시된 값을 그대로
+    반환합니다 (app/services/school_ai.py 참고).
+    """
+    try:
+        return await school_ai.get_or_generate_school_intro(db, office_code, school_code)
+    except school_ai.SchoolNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except school_ai.AIGenerationTimeout as e:
+        raise HTTPException(status_code=503, detail=str(e))

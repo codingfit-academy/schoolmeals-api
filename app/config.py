@@ -43,6 +43,12 @@ class Settings:
     neis_api_key: str = os.getenv("NEIS_API_KEY", "")
     neis_base_url: str = "https://open.neis.go.kr/hub"
 
+    # ── AI 학교소개 생성 (school_ai) ───────────────────────────
+    # ai_provider: "claude" | "stub" (키 없이 파이프라인만 테스트할 때)
+    ai_provider: str = os.getenv("AI_PROVIDER", "claude")
+    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
+
     # ── 프론트에 내려줄 공개 값 (GET /config) ─────────────────
     #    ⚠ 브라우저에 노출됩니다. 공개해도 되는 값만 넣으세요.
     @property

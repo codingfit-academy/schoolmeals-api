@@ -31,6 +31,7 @@ from .config import settings
 from .database import Base, engine, get_db
 from .models import Item
 from .routers import meals, schools
+from .scheduler import shutdown_scheduler, start_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +46,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    start_scheduler()
     yield
+    shutdown_scheduler()
 
 
 app = FastAPI(title="Academy API", lifespan=lifespan)
