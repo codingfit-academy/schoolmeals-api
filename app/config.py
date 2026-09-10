@@ -43,11 +43,20 @@ class Settings:
     neis_api_key: str = os.getenv("NEIS_API_KEY", "")
     neis_base_url: str = "https://open.neis.go.kr/hub"
 
+    # ── 유튜브 (먹방 영상 검색) ────────────────────────────────
+    # Google Cloud Console에서 "YouTube Data API v3" 활성화 후 발급받은 키
+    youtube_api_key: str = os.getenv("YOUTUBE_API_KEY", "")
+    youtube_base_url: str = "https://www.googleapis.com/youtube/v3"
+
     # ── AI 학교소개 생성 (school_ai) ───────────────────────────
-    # ai_provider: "claude" | "stub" (키 없이 파이프라인만 테스트할 때)
-    ai_provider: str = os.getenv("AI_PROVIDER", "claude")
+    # ai_provider: "gemini" | "claude" | "stub" (키 없이 파이프라인만 테스트할 때)
+    ai_provider: str = os.getenv("AI_PROVIDER", "gemini")
+    # Gemini — 가장 저렴한 flash-lite 계열을 기본값으로 둔다.
+    # 모델명/단가는 자주 바뀌므로 Google AI Studio에서 현재 최저가 모델을 확인해 조정하세요.
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
+    anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
     # ── 프론트에 내려줄 공개 값 (GET /config) ─────────────────
     #    ⚠ 브라우저에 노출됩니다. 공개해도 되는 값만 넣으세요.

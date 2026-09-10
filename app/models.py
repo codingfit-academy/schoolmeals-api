@@ -80,6 +80,75 @@ class Meal(Base):
     )
 
 
+class MealIngestState(Base):
+    """학교별 급식 수집 구간 기록 — "어디부터 어디까지 이미 가져왔는지".
+
+    요청 구간이 covered_from~covered_to 안에 들어오면 NEIS를 다시 호출하지 않고
+    DB만 읽는다 (app/services/ingest.py 참고).
+    """
+    __tablename__ = "meal_ingest_states"
+    __table_args__ = (
+        UniqueConstraint("office_code", "school_code", name="uq_meal_ingest_states_code"),
+    )
+
+    id: Mapped[int]             = mapped_column(Integer, primary_key=True)
+    office_code: Mapped[str]    = mapped_column(String(10), nullable=False, index=True)
+    school_code: Mapped[str]    = mapped_column(String(10), nullable=False, index=True)
+    covered_from: Mapped[date]  = mapped_column(Date, nullable=False)
+    covered_to: Mapped[date]    = mapped_column(Date, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class YoutubeCache(Base):
+    """검색어별 유튜브 결과 캐시 — 검색어당 유튜브 API는 최초 1회만 호출한다.
+
+    YouTube Data API는 search.list 1회당 100유닛(일 10,000유닛 무료)이라
+    한 번 받아온 결과는 그대로 재사용한다.
+    """
+    __tablename__ = "youtube_caches"
+    __table_args__ = (UniqueConstraint("query", name="uq_youtube_caches_query"),)
+
+    id: Mapped[int]        = mapped_column(Integer, primary_key=True)
+    query: Mapped[str]     = mapped_column(String(200), nullable=False)
+    payload: Mapped[list]  = mapped_column(JSON, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class FoodLike(Base):
+    """급식 메뉴 '찜' 카운터 — 랜딩페이지 '이번 달 BEST' 순위의 실제 근거.
+
+    문구가 '이번 달'이므로 year_month(YYYY-MM) 단위로 집계한다.
+    """
+    __tablename__ = "food_likes"
+    __table_args__ = (UniqueConstraint("slug", "year_month", name="uq_food_likes_slug_month"),)
+
+    id: Mapped[int]         = mapped_column(Integer, primary_key=True)
+    slug: Mapped[str]       = mapped_column(String(50), nullable=False, index=True)
+    year_month: Mapped[str] = mapped_column(String(7), nullable=False, index=True)
+    count: Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MenuVote(Base):
+    """메뉴 투표 카운터 — 투표 페이지가 '이번 주' 기준이므로 주 단위로 집계한다."""
+    __tablename__ = "menu_votes"
+    __table_args__ = (UniqueConstraint("option_key", "iso_week", name="uq_menu_votes_option_week"),)
+
+    id: Mapped[int]         = mapped_column(Integer, primary_key=True)
+    option_key: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    iso_week: Mapped[str]   = mapped_column(String(10), nullable=False, index=True)
+    count: Mapped[int]      = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SchoolAiContent(Base):
     """학교별 AI 소개 캐시 — 학교당 1행, 최초 방문 시 1회만 생성한다.
 

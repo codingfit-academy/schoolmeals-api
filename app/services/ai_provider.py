@@ -3,13 +3,19 @@ AI 학교소개 생성 provider
 ─────────────────────────────────────────────────────────────
 실제 LLM 호출부를 AIProvider 인터페이스 뒤로 숨겨서, 나중에 provider를
 바꾸더라도 app/services/school_ai.py(캐싱 오케스트레이션)는 건드릴 필요가
-없게 한다. 지금은 Claude(Anthropic API)를 기본으로 쓰되, ANTHROPIC_API_KEY가
-없으면 StubAIProvider로 자동 대체해 파이프라인 자체는 항상 동작하게 한다.
+없게 한다. 기본은 Gemini(가장 저렴한 flash-lite 계열)이고, Claude도 그대로
+선택할 수 있다. API 키가 없으면 StubAIProvider로 자동 대체해 파이프라인
+자체는 항상 동작하게 한다.
+
+AI 호출 자체는 학교당 최초 1회만 일어난다 — school_ai.py가 결과를 DB에
+캐시하고 이후 접속자에게는 저장된 값을 그대로 내려준다.
 """
 import logging
 from abc import ABC, abstractmethod
 
 import anthropic
+from google import genai
+from google.genai import types
 from pydantic import BaseModel
 
 from ..config import settings
@@ -47,6 +53,49 @@ class _SchoolIntro(BaseModel):
     meal_comment: str
 
 
+def build_prompt(school: dict, meals: list[dict]) -> str:
+    """provider와 무관한 학교소개 생성 프롬프트."""
+    meal_lines = "\n".join(
+        f"- {m['meal_date']} ({m['meal_type_name']}): {m['menu_text']}"
+        for m in meals
+    ) or "(최근 급식 정보 없음)"
+
+    return (
+        f"학교명: {school.get('name') or '정보 없음'}\n"
+        f"종류: {school.get('kind') or '정보 없음'}\n"
+        f"주소: {school.get('address') or '정보 없음'}\n\n"
+        f"최근 급식 정보:\n{meal_lines}\n\n"
+        "위 정보를 바탕으로, 이 학교 페이지를 처음 방문한 학부모/학생에게 보여줄 "
+        "짧고 친근한 학교 소개를 작성해줘. 과장하지 말고 사실 위주로."
+    )
+
+
+class GeminiAIProvider(AIProvider):
+    """Google Gemini — flash-lite 계열을 쓰면 토큰 단가가 가장 저렴하다."""
+
+    name = "gemini"
+
+    def __init__(self, api_key: str, model: str):
+        self._client = genai.Client(api_key=api_key)
+        self._model = model
+
+    async def generate_school_intro(self, school: dict, meals: list[dict]) -> dict:
+        response = await self._client.aio.models.generate_content(
+            model=self._model,
+            contents=build_prompt(school, meals),
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=_SchoolIntro,
+            ),
+        )
+        parsed: _SchoolIntro = response.parsed
+        return {
+            "intro": parsed.intro,
+            "highlights": parsed.highlights,
+            "mealComment": parsed.meal_comment,
+        }
+
+
 class ClaudeAIProvider(AIProvider):
     name = "claude"
 
@@ -55,19 +104,7 @@ class ClaudeAIProvider(AIProvider):
         self._model = model
 
     async def generate_school_intro(self, school: dict, meals: list[dict]) -> dict:
-        meal_lines = "\n".join(
-            f"- {m['meal_date']} ({m['meal_type_name']}): {m['menu_text']}"
-            for m in meals
-        ) or "(최근 급식 정보 없음)"
-
-        prompt = (
-            f"학교명: {school.get('name') or '정보 없음'}\n"
-            f"종류: {school.get('kind') or '정보 없음'}\n"
-            f"주소: {school.get('address') or '정보 없음'}\n\n"
-            f"최근 급식 정보:\n{meal_lines}\n\n"
-            "위 정보를 바탕으로, 이 학교 페이지를 처음 방문한 학부모/학생에게 보여줄 "
-            "짧고 친근한 학교 소개를 작성해줘. 과장하지 말고 사실 위주로."
-        )
+        prompt = build_prompt(school, meals)
 
         response = await self._client.messages.parse(
             model=self._model,
@@ -84,6 +121,14 @@ class ClaudeAIProvider(AIProvider):
 
 
 def get_ai_provider() -> AIProvider:
+    if settings.ai_provider == "gemini":
+        if not settings.gemini_api_key:
+            logger.warning(
+                "AI_PROVIDER=gemini 이지만 GEMINI_API_KEY가 비어있어 StubAIProvider로 대체합니다."
+            )
+            return StubAIProvider()
+        return GeminiAIProvider(api_key=settings.gemini_api_key, model=settings.gemini_model)
+
     if settings.ai_provider == "claude":
         if not settings.anthropic_api_key:
             logger.warning(

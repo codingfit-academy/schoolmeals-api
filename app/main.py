@@ -30,8 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .database import Base, engine, get_db
 from .models import Item
-from .routers import meals, schools
-from .scheduler import shutdown_scheduler, start_scheduler
+from .routers import foods, meals, schools, votes, youtube
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,9 +45,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    start_scheduler()
     yield
-    shutdown_scheduler()
 
 
 app = FastAPI(title="Academy API", lifespan=lifespan)
@@ -133,3 +130,6 @@ async def delete_item(item_id: int, db: AsyncSession = Depends(get_db)):
 # ── 라우터 등록 ───────────────────────────────────────────────
 app.include_router(meals.router, tags=["meals"])
 app.include_router(schools.router, tags=["schools"])
+app.include_router(foods.router, tags=["foods"])
+app.include_router(votes.router, tags=["votes"])
+app.include_router(youtube.router, tags=["youtube"])

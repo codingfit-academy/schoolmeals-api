@@ -1,92 +1,95 @@
 """
-NEIS 배치 수집 — 학교기본정보 + 급식정보를 DB에 upsert
+NEIS 지연(lazy) 수집 — 필요할 때만 가져와서 DB에 저장
 ─────────────────────────────────────────────────────────────
-평일 새벽 1시에 app/scheduler.py가 이 모듈의 run_daily_ingest()를 호출한다.
-학교 단위로 실패를 격리한다 — 한 학교의 급식 조회가 실패해도 나머지 학교는
-계속 처리한다.
+전 지역/전 학교를 매일 새벽에 통째로 긁어오던 배치를 없애고, 사용자가 실제로
+연 학교에 대해 "아직 안 가져온 기간"만 NEIS를 호출하도록 바꿨다.
+
+  ensure_school : schools 행이 없을 때만 학교 1건 조회 → upsert
+  ensure_meals  : 요청 구간이 이미 가져온 구간(meal_ingest_states) 안이면
+                  NEIS 호출도 DB 쓰기도 하지 않고 즉시 반환
+
+즉 NEIS 호출과 DB 쓰기는 "처음 보는 학교" 또는 "처음 보는 기간"에서만 발생한다.
 """
 import logging
 from datetime import date, datetime, timedelta
 
-import httpx
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..database import SessionLocal
-from ..models import Meal, School
+from ..models import Meal, MealIngestState, School
 from . import neis
 
 logger = logging.getLogger("ingest")
 
-MEAL_LOOKBACK_DAYS = 7
-MEAL_LOOKAHEAD_DAYS = 14
+# 한 번 가져올 때 요청 구간 앞뒤로 덧붙이는 여유분 —
+# 사용자가 달력을 한 달씩 넘길 때 매번 NEIS를 때리지 않도록 한다.
+_PADDING_DAYS = 14
+
+_YMD = "%Y%m%d"
 
 
-async def run_daily_ingest() -> None:
-    logger.info("배치 수집 시작")
-    total_schools = 0
-    total_meals = 0
+async def ensure_school(db: AsyncSession, office_code: str, school_code: str) -> School | None:
+    """학교 행이 없을 때만 NEIS에서 해당 학교 1건을 가져와 저장한다."""
+    school = await _fetch_school_row(db, office_code, school_code)
+    if school is not None:
+        return school
 
-    async with SessionLocal() as db:
-        for region, office_code in neis.REGION_OFFICE_CODES.items():
-            try:
-                rows = await neis.fetch_all_schools(office_code)
-            except (httpx.HTTPStatusError, httpx.RequestError):
-                logger.exception("학교 목록 조회 실패: region=%s", region)
-                continue
+    region = _region_of(office_code)
+    if region is None:
+        return None
 
-            school_codes = await _upsert_schools(db, region, office_code, rows)
-            total_schools += len(school_codes)
+    rows = await neis.fetch_all_schools(office_code)
+    row = next((r for r in rows if r.get("SD_SCHUL_CODE") == school_code), None)
+    if row is None:
+        logger.warning("NEIS에 없는 학교: %s/%s", office_code, school_code)
+        return None
 
-            for school_code in school_codes:
-                try:
-                    total_meals += await _ingest_meals(db, office_code, school_code)
-                except (httpx.HTTPStatusError, httpx.RequestError):
-                    logger.exception(
-                        "급식 조회 실패: office_code=%s school_code=%s", office_code, school_code
-                    )
-                    continue
-
-    logger.info("배치 수집 완료: 학교 %d건, 급식(일자x끼니) %d건", total_schools, total_meals)
-
-
-async def _upsert_schools(db, region: str, office_code: str, rows: list[dict]) -> list[str]:
-    school_codes: list[str] = []
-    for row in rows:
-        school_code = row.get("SD_SCHUL_CODE")
-        if not school_code:
-            continue
-        school_codes.append(school_code)
-
-        values = {
-            "region": region,
-            "name": row.get("SCHUL_NM", ""),
-            "kind": row.get("SCHUL_KND_SC_NM"),
-            "address": row.get("ORG_RDNMA"),
-        }
-        stmt = (
-            insert(School)
-            .values(office_code=office_code, school_code=school_code, **values)
-            .on_conflict_do_update(
-                index_elements=["office_code", "school_code"],
-                set_=values,
-            )
-        )
-        await db.execute(stmt)
-
+    values = {
+        "region": region,
+        "name": row.get("SCHUL_NM", ""),
+        "kind": row.get("SCHUL_KND_SC_NM"),
+        "address": row.get("ORG_RDNMA"),
+    }
+    await db.execute(
+        insert(School)
+        .values(office_code=office_code, school_code=school_code, **values)
+        .on_conflict_do_update(index_elements=["office_code", "school_code"], set_=values)
+    )
     await db.commit()
-    return school_codes
+    logger.info("학교 정보 최초 저장: %s/%s %s", office_code, school_code, values["name"])
+    return await _fetch_school_row(db, office_code, school_code)
 
 
-async def _ingest_meals(db, office_code: str, school_code: str) -> int:
-    today = date.today()
-    from_ymd = (today - timedelta(days=MEAL_LOOKBACK_DAYS)).strftime("%Y%m%d")
-    to_ymd = (today + timedelta(days=MEAL_LOOKAHEAD_DAYS)).strftime("%Y%m%d")
+async def ensure_meals(
+    db: AsyncSession,
+    office_code: str,
+    school_code: str,
+    from_ymd: str,
+    to_ymd: str,
+) -> None:
+    """요청 구간이 아직 안 가져온 범위를 포함할 때만 NEIS를 호출해 채운다."""
+    want_from = datetime.strptime(from_ymd, _YMD).date()
+    want_to = datetime.strptime(to_ymd, _YMD).date()
+
+    state = await _fetch_ingest_state(db, office_code, school_code)
+    if state is not None and state.covered_from <= want_from and want_to <= state.covered_to:
+        return
+
+    # 기존 구간과 요청 구간을 합친 뒤 여유분을 붙여 한 번에 가져온다
+    fetch_from = want_from - timedelta(days=_PADDING_DAYS)
+    fetch_to = want_to + timedelta(days=_PADDING_DAYS)
+    if state is not None:
+        fetch_from = min(fetch_from, state.covered_from)
+        fetch_to = max(fetch_to, state.covered_to)
+
+    await ensure_school(db, office_code, school_code)
 
     data = await neis.fetch_meal_info(
         atpt_ofcdc_sc_code=office_code,
         sd_schul_code=school_code,
-        mlsv_from_ymd=from_ymd,
-        mlsv_to_ymd=to_ymd,
+        mlsv_from_ymd=fetch_from.strftime(_YMD),
+        mlsv_to_ymd=fetch_to.strftime(_YMD),
     )
     rows = neis.extract_rows(data, neis.MEAL_ENDPOINT)
 
@@ -103,12 +106,12 @@ async def _ingest_meals(db, office_code: str, school_code: str) -> int:
             "origin_info": row.get("ORPLC_INFO"),
             "raw": row,
         }
-        stmt = (
+        await db.execute(
             insert(Meal)
             .values(
                 office_code=office_code,
                 school_code=school_code,
-                meal_date=datetime.strptime(mlsv_ymd, "%Y%m%d").date(),
+                meal_date=datetime.strptime(mlsv_ymd, _YMD).date(),
                 meal_type=meal_type,
                 **values,
             )
@@ -117,7 +120,67 @@ async def _ingest_meals(db, office_code: str, school_code: str) -> int:
                 set_=values,
             )
         )
-        await db.execute(stmt)
 
+    covered = {"covered_from": fetch_from, "covered_to": fetch_to}
+    await db.execute(
+        insert(MealIngestState)
+        .values(office_code=office_code, school_code=school_code, **covered)
+        .on_conflict_do_update(index_elements=["office_code", "school_code"], set_=covered)
+    )
     await db.commit()
-    return len(rows)
+    logger.info(
+        "급식 수집: %s/%s %s~%s (%d건)",
+        office_code, school_code, fetch_from, fetch_to, len(rows),
+    )
+
+
+async def fetch_stored_meals(
+    db: AsyncSession,
+    office_code: str,
+    school_code: str,
+    from_date: date,
+    to_date: date,
+    meal_type: str | None = None,
+) -> list[dict]:
+    """DB에 저장해둔 NEIS 원본 row들을 날짜순으로 반환한다."""
+    stmt = (
+        select(Meal)
+        .where(
+            Meal.office_code == office_code,
+            Meal.school_code == school_code,
+            Meal.meal_date >= from_date,
+            Meal.meal_date <= to_date,
+        )
+        .order_by(Meal.meal_date, Meal.meal_type)
+    )
+    if meal_type:
+        stmt = stmt.where(Meal.meal_type == meal_type)
+
+    result = await db.execute(stmt)
+    return [m.raw for m in result.scalars().all() if m.raw]
+
+
+async def _fetch_school_row(db: AsyncSession, office_code: str, school_code: str) -> School | None:
+    result = await db.execute(
+        select(School).where(School.office_code == office_code, School.school_code == school_code)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _fetch_ingest_state(
+    db: AsyncSession, office_code: str, school_code: str
+) -> MealIngestState | None:
+    result = await db.execute(
+        select(MealIngestState).where(
+            MealIngestState.office_code == office_code,
+            MealIngestState.school_code == school_code,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+def _region_of(office_code: str) -> str | None:
+    for region, code in neis.REGION_OFFICE_CODES.items():
+        if code == office_code:
+            return region
+    return None
