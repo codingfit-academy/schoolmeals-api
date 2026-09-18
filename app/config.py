@@ -48,13 +48,15 @@ class Settings:
     youtube_api_key: str = os.getenv("YOUTUBE_API_KEY", "")
     youtube_base_url: str = "https://www.googleapis.com/youtube/v3"
 
-    # ── AI 학교소개 생성 (school_ai) ───────────────────────────
+    # ── AI 메뉴 분석 (app/services/menu_insights.py, ai_provider.py) ────────
     # ai_provider: "gemini" | "claude" | "stub" (키 없이 파이프라인만 테스트할 때)
     ai_provider: str = os.getenv("AI_PROVIDER", "gemini")
     # Gemini — 가장 저렴한 flash-lite 계열을 기본값으로 둔다.
     # 모델명/단가는 자주 바뀌므로 Google AI Studio에서 현재 최저가 모델을 확인해 조정하세요.
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    # os.getenv(..., default)는 변수가 "설정은 됐지만 빈 문자열"일 때 default를 쓰지 않으므로
+    # (.env에 주석 처리 안내로 `GEMINI_MODEL=`만 남아있는 경우가 흔해) `or`로 한 번 더 방어한다.
+    gemini_model: str = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite"
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
     anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 

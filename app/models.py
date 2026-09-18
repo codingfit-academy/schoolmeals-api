@@ -149,22 +149,58 @@ class MenuVote(Base):
     )
 
 
-class SchoolAiContent(Base):
-    """학교별 AI 소개 캐시 — 학교당 1행, 최초 방문 시 1회만 생성한다.
+class MenuInsight(Base):
+    """학교 × 날짜별 AI 메뉴 분석 캐시 (인기 메뉴 / 먹는 팁 / 건강 포인트).
 
-    status로 동시 요청의 중복 AI 호출을 막는다 (app/services/school_ai.py 참고):
+    그 학교의 그 날짜 급식 페이지에 최초 접속했을 때만 AI를 호출하고, 이후
+    같은 학교·같은 날짜 방문자에게는 이 캐시를 그대로 내려준다. status로
+    동시 요청의 중복 AI 호출을 막는다 (app/services/menu_insights.py 참고):
     pending(생성 중) → done(캐시 완료) / failed(재시도 가능).
     """
-    __tablename__ = "school_ai_contents"
+    __tablename__ = "menu_insights"
     __table_args__ = (
-        UniqueConstraint("office_code", "school_code", name="uq_school_ai_contents_code"),
+        UniqueConstraint("office_code", "school_code", "meal_date", name="uq_menu_insights_code_date"),
     )
 
     id: Mapped[int]            = mapped_column(Integer, primary_key=True)
     office_code: Mapped[str]   = mapped_column(String(10), nullable=False, index=True)
     school_code: Mapped[str]   = mapped_column(String(10), nullable=False, index=True)
+    meal_date: Mapped[date]    = mapped_column(Date, nullable=False, index=True)
     status: Mapped[str]        = mapped_column(String(10), nullable=False, default="pending")
     content: Mapped[dict]      = mapped_column(JSON, nullable=True)
+    model: Mapped[str]         = mapped_column(String(50), nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MealAllergenNote(Base):
+    """학교 × 날짜별 AI 알레르기 보완 정보 캐시 (/calendar 페이지).
+
+    NEIS 공식 알레르기 코드(1~19)는 학교가 직접 태깅한 값이라 실제로 들어있어도
+    누락되는 경우가 있다 (예: '삼치된장박이구이'에 생선류 알레르기 코드가 빠진
+    실제 사례로 확인됨). AI가 메뉴 이름만 보고 확실히 알 수 있는 경우에 한해
+    놓쳤을 수 있는 알레르기 성분을 추정해 보완한다 — 참고용이며 NEIS 공식
+    코드를 대체하지 않는다 (프론트에서도 별도로 표시).
+
+    menu_hash로 그 날짜의 메뉴 내용이 바뀌었는지 감지한다 — 메뉴가 그대로면
+    달력을 다시 봐도(월 이동 후 되돌아와도) AI를 재호출하지 않는다. status로
+    동시 요청의 중복 AI 호출을 막는다 (app/services/allergen_notes.py 참고):
+    pending(생성 중) → done(캐시 완료) / failed(재시도 가능).
+    """
+    __tablename__ = "meal_allergen_notes"
+    __table_args__ = (
+        UniqueConstraint("office_code", "school_code", "meal_date", name="uq_meal_allergen_notes_code_date"),
+    )
+
+    id: Mapped[int]            = mapped_column(Integer, primary_key=True)
+    office_code: Mapped[str]   = mapped_column(String(10), nullable=False, index=True)
+    school_code: Mapped[str]   = mapped_column(String(10), nullable=False, index=True)
+    meal_date: Mapped[date]    = mapped_column(Date, nullable=False, index=True)
+    menu_hash: Mapped[str]     = mapped_column(String(64), nullable=False)
+    status: Mapped[str]        = mapped_column(String(10), nullable=False, default="pending")
+    content: Mapped[list]      = mapped_column(JSON, nullable=True)
     model: Mapped[str]         = mapped_column(String(50), nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
