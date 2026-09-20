@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .database import Base, engine, get_db
 from .models import Item
-from .routers import foods, meals, project_intro, schools, votes, youtube
+from .routers import foods, meals, project_intro, school_likes, schools, votes, youtube
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,3 +134,4 @@ app.include_router(foods.router, tags=["foods"])
 app.include_router(votes.router, tags=["votes"])
 app.include_router(youtube.router, tags=["youtube"])
 app.include_router(project_intro.router, tags=["project-intro"])
+app.include_router(school_likes.router, tags=["school-likes"])

@@ -135,6 +135,27 @@ class FoodLike(Base):
     )
 
 
+class SchoolMealLike(Base):
+    """학교 × 날짜별 급식 '좋아요' 카운터 — 랜딩페이지 '이번 달 가장 인기있는 급식 학교'의 근거.
+
+    문구가 '이번 달'이므로 조회 시 meal_date를 그 달 범위로 걸러 집계한다.
+    중복 클릭 방지는 서버가 아니라 프론트(localStorage, 학교×날짜 단위)가 담당한다.
+    """
+    __tablename__ = "school_meal_likes"
+    __table_args__ = (
+        UniqueConstraint("office_code", "school_code", "meal_date", name="uq_school_meal_likes_code_date"),
+    )
+
+    id: Mapped[int]          = mapped_column(Integer, primary_key=True)
+    office_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    school_code: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    meal_date: Mapped[date]  = mapped_column(Date, nullable=False, index=True)
+    count: Mapped[int]       = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class MenuVote(Base):
     """메뉴 투표 카운터 — 투표 페이지가 '이번 주' 기준이므로 주 단위로 집계한다."""
     __tablename__ = "menu_votes"
