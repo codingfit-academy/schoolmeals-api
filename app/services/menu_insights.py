@@ -45,18 +45,25 @@ async def get_or_generate_menu_insights(
         return await _generate_and_save(db, office_code, school_code, meal_date, dishes)
 
     row = await _fetch_row(db, office_code, school_code, meal_date)
-    if row.status == "done":
-        if not _is_outdated(row.content):
-            return _serialize(row)
-        # 예전 프롬프트로 저장된 캐시 — 새로 생긴 항목(영양 밸런스·검색어)이 비어 있으므로
-        # 그 학교×날짜에 대해 딱 한 번만 다시 생성한다. 이후로는 다시 캐시가 쓰인다.
-        logger.info("예전 스키마 캐시 감지 — 1회 재생성: %s/%s/%s", office_code, school_code, meal_date)
-        if await _try_reclaim_outdated(db, office_code, school_code, meal_date):
-            return await _generate_and_save(db, office_code, school_code, meal_date, dishes)
-        return await _wait_for_done(db, office_code, school_code, meal_date)
+    if row.status == "done" and not _is_outdated(row.content):
+        return _serialize(row)
 
-    if row.status == "failed" and await _try_reclaim_failed(db, office_code, school_code, meal_date):
-        return await _generate_and_save(db, office_code, school_code, meal_date, dishes)
+    # 여기부터는 재생성 대상이다:
+    #  - done인데 예전 프롬프트로 저장돼 새 항목(영양 밸런스·검색어)이 비어 있거나
+    #  - 지난번 생성이 failed로 끝난 경우
+    if row.status != "pending" and await _try_reclaim(db, office_code, school_code, meal_date):
+        try:
+            return await _generate_and_save(db, office_code, school_code, meal_date, dishes)
+        except Exception:
+            # 이미 저장해 둔 값이 있으면 에러 대신 그거라도 보여준다 —
+            # 새 항목을 못 채웠다고 예전부터 잘 보이던 팁·건강 포인트까지 사라지면 안 된다.
+            if row.content:
+                logger.warning(
+                    "재생성 실패 — 저장돼 있던 값으로 응답합니다: %s/%s/%s",
+                    office_code, school_code, meal_date,
+                )
+                return _serialize(row)
+            raise
 
     return await _wait_for_done(db, office_code, school_code, meal_date)
 
@@ -82,35 +89,18 @@ def _is_outdated(content: dict | None) -> bool:
     return not content or any(key not in content for key in _REQUIRED_CONTENT_KEYS)
 
 
-async def _try_reclaim_outdated(
+async def _try_reclaim(
     db: AsyncSession, office_code: str, school_code: str, meal_date: date
 ) -> bool:
-    """done 상태인 예전 캐시를 pending으로 되돌려 재생성 권한을 선점한다.
-    status='done' 조건이 있어서 동시 요청 중 한 쪽만 성공한다."""
+    """재생성 대상(done인데 예전 스키마이거나, failed인 행)을 pending으로 되돌려 선점한다.
+    status != 'pending' 조건이 있어서 동시 요청 중 한 쪽만 성공한다."""
     stmt = (
         update(MenuInsight)
         .where(
             MenuInsight.office_code == office_code,
             MenuInsight.school_code == school_code,
             MenuInsight.meal_date == meal_date,
-            MenuInsight.status == "done",
-        )
-        .values(status="pending")
-        .returning(MenuInsight.id)
-    )
-    result = await db.execute(stmt)
-    await db.commit()
-    return result.first() is not None
-
-
-async def _try_reclaim_failed(db: AsyncSession, office_code: str, school_code: str, meal_date: date) -> bool:
-    stmt = (
-        update(MenuInsight)
-        .where(
-            MenuInsight.office_code == office_code,
-            MenuInsight.school_code == school_code,
-            MenuInsight.meal_date == meal_date,
-            MenuInsight.status == "failed",
+            MenuInsight.status != "pending",
         )
         .values(status="pending")
         .returning(MenuInsight.id)
