@@ -46,7 +46,14 @@ async def get_or_generate_menu_insights(
 
     row = await _fetch_row(db, office_code, school_code, meal_date)
     if row.status == "done":
-        return _serialize(row)
+        if not _is_outdated(row.content):
+            return _serialize(row)
+        # 예전 프롬프트로 저장된 캐시 — 새로 생긴 항목(영양 밸런스·검색어)이 비어 있으므로
+        # 그 학교×날짜에 대해 딱 한 번만 다시 생성한다. 이후로는 다시 캐시가 쓰인다.
+        logger.info("예전 스키마 캐시 감지 — 1회 재생성: %s/%s/%s", office_code, school_code, meal_date)
+        if await _try_reclaim_outdated(db, office_code, school_code, meal_date):
+            return await _generate_and_save(db, office_code, school_code, meal_date, dishes)
+        return await _wait_for_done(db, office_code, school_code, meal_date)
 
     if row.status == "failed" and await _try_reclaim_failed(db, office_code, school_code, meal_date):
         return await _generate_and_save(db, office_code, school_code, meal_date, dishes)
@@ -59,6 +66,36 @@ async def _try_claim(db: AsyncSession, office_code: str, school_code: str, meal_
         insert(MenuInsight)
         .values(office_code=office_code, school_code=school_code, meal_date=meal_date, status="pending")
         .on_conflict_do_nothing(index_elements=["office_code", "school_code", "meal_date"])
+        .returning(MenuInsight.id)
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+    return result.first() is not None
+
+
+# content에 이 키들이 모두 있어야 최신 스키마로 저장된 캐시다 (프롬프트에 항목이 추가될 때마다 갱신).
+_REQUIRED_CONTENT_KEYS = ("balance", "searchKeywords")
+
+
+def _is_outdated(content: dict | None) -> bool:
+    """예전 프롬프트로 저장된 캐시인지 판단한다 — DB 마이그레이션 없이 내용만으로 구분한다."""
+    return not content or any(key not in content for key in _REQUIRED_CONTENT_KEYS)
+
+
+async def _try_reclaim_outdated(
+    db: AsyncSession, office_code: str, school_code: str, meal_date: date
+) -> bool:
+    """done 상태인 예전 캐시를 pending으로 되돌려 재생성 권한을 선점한다.
+    status='done' 조건이 있어서 동시 요청 중 한 쪽만 성공한다."""
+    stmt = (
+        update(MenuInsight)
+        .where(
+            MenuInsight.office_code == office_code,
+            MenuInsight.school_code == school_code,
+            MenuInsight.meal_date == meal_date,
+            MenuInsight.status == "done",
+        )
+        .values(status="pending")
         .returning(MenuInsight.id)
     )
     result = await db.execute(stmt)
@@ -146,9 +183,10 @@ async def _generate_and_save(
 def _serialize(row: MenuInsight) -> dict:
     content = row.content or {}
     return {
-        "favorite": content.get("favorite"),
         "eatingTip": content.get("eatingTip"),
         "healthNotes": content.get("healthNotes", []),
+        "balance": content.get("balance"),
+        "searchKeywords": content.get("searchKeywords", []),
         "model": row.model,
         "generatedAt": row.generated_at.isoformat() if row.generated_at else None,
     }

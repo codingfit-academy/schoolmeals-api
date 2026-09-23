@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
-from ..services import allergen_notes, ingest, menu_insights, neis
+from ..services import allergen_notes, ingest, menu_insights, neis, video_guides
 
 logger = logging.getLogger("neis")
 
@@ -106,6 +106,54 @@ async def get_menu_insights(body: MenuInsightsRequest, db: AsyncSession = Depend
     except Exception as e:
         logger.exception("AI 메뉴 분석 실패")
         raise HTTPException(status_code=502, detail=f"AI 메뉴 분석 실패: {e}")
+
+
+class VideoQuery(BaseModel):
+    dish: str
+    query: str
+
+
+class VideoGuideRequest(BaseModel):
+    atpt_ofcdc_sc_code: str
+    sd_schul_code: str
+    mlsv_ymd: str
+    queries: list[VideoQuery]
+
+
+@router.post("/meals/video-eating-guide")
+async def get_video_eating_guide(body: VideoGuideRequest, db: AsyncSession = Depends(get_db)):
+    """그 날 메뉴로 찾은 유튜브 먹방 영상들을 AI(Gemini)가 읽고, 사람들이 실제로 어떻게
+    먹는지와 '유튜버들이 가장 추천하는 식사법'을 정리해 돌려줍니다.
+
+    영상 정보는 요청 본문이 아니라 서버가 이미 갖고 있는 youtube_caches에서 읽습니다 —
+    프론트는 어떤 검색어로 찾았는지(queries)만 보내면 됩니다.
+
+    학교 × 날짜 단위로 캐시되어 처음 접속했을 때만 AI가 호출되고, 이후에는 DB에 저장된
+    값을 그대로 반환합니다. 영상 목록이 실제로 바뀐 경우에만 다시 생성합니다
+    (app/services/video_guides.py).
+    """
+    try:
+        meal_date = datetime.strptime(body.mlsv_ymd, _YMD).date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="mlsv_ymd는 YYYYMMDD 형식이어야 합니다.")
+
+    queries = [
+        {"dish": q.dish.strip(), "query": q.query.strip()}
+        for q in body.queries
+        if q.dish.strip() and q.query.strip()
+    ]
+    if not queries:
+        raise HTTPException(status_code=400, detail="queries가 비어있습니다.")
+
+    try:
+        return await video_guides.get_or_generate_video_guide(
+            db, body.atpt_ofcdc_sc_code, body.sd_schul_code, meal_date, queries
+        )
+    except video_guides.AIGenerationTimeout as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logger.exception("AI 식사법 요약 실패")
+        raise HTTPException(status_code=502, detail=f"AI 식사법 요약 실패: {e}")
 
 
 class AllergenNotesDish(BaseModel):

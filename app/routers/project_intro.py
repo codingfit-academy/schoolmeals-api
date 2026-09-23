@@ -11,7 +11,11 @@ app/main.py에 include_router 되어 있어 GET /project-intro 로 바로 조회
 from fastapi import APIRouter
 
 from ..config import settings
-from ..services.ai_provider import build_allergen_notes_prompt, build_menu_insights_prompt
+from ..services.ai_provider import (
+    build_allergen_notes_prompt,
+    build_eating_methods_prompt,
+    build_menu_insights_prompt,
+)
 
 router = APIRouter()
 
@@ -55,20 +59,31 @@ AI_USAGE = {
     "capabilities": [
         {
             "name": "메뉴 분석 (/menu 페이지)",
-            "purpose": "오늘 급식 메뉴 분석 — 인기 메뉴 선택 + 먹는 팁(있을 때만) + 건강 포인트",
+            "purpose": (
+                "오늘 급식 메뉴 분석 — 먹는 팁(있을 때만) + 건강 포인트 + 영양 밸런스 점수 + "
+                "유튜브 검색어 다듬기. 네 가지를 한 번의 호출로 묶어서 받습니다."
+            ),
             "structuredOutput": {
                 "method": "response_mime_type='application/json' + Pydantic response_schema",
                 "schema": {
-                    "favorite": "str — 오늘 메뉴 중 학생들이 가장 좋아할 만한 메뉴 하나 (목록에 있는 표기 그대로)",
                     "eating_tip": "{dish, tip} | null — 더 맛있게 먹는 구체적인 방법. 억지로 만들지 않고, 없으면 null",
                     "health_notes": (
                         "list[{body_part, note}] — body_part는 프론트가 인체 그림 위 고정 좌표에 매핑할 수 있도록 "
                         "뇌/눈/목/심장/폐/위장/장/근육/뼈/혈액/피부/면역력/전신 13개 값으로만 제한(Literal)"
                     ),
+                    "balance": (
+                        "{score: 0~100, summary: str, groups: list[{group, level}]} — group은 "
+                        "탄수화물/단백질/채소/칼슘/비타민, level은 충분/보통/부족으로만 제한(Literal)"
+                    ),
+                    "search_keywords": (
+                        "list[{dish, keyword}] — 급식 표기('포크타코또띠아롤-')를 유튜브에서 실제로 검색되는 "
+                        "음식 이름('타코')으로 다듬은 결과. dish는 입력 메뉴 목록에 있는 표기만 허용(서버에서 검증)"
+                    ),
                 },
                 "reason": (
-                    "JSON 스키마를 강제해 파싱 실패 없이 그대로 프론트에 내려주고, body_part를 고정 목록으로 "
-                    "제한해 프론트의 인체 그림이 항상 정해진 위치에 점을 찍을 수 있게 했습니다."
+                    "JSON 스키마를 강제해 파싱 실패 없이 그대로 프론트에 내려주고, body_part·group·level을 "
+                    "고정 목록으로 제한해 프론트의 인체 그림과 밸런스 카드가 항상 정해진 위치·색으로 "
+                    "렌더링되게 했습니다."
                 ),
             },
             "callPolicy": {
@@ -82,13 +97,71 @@ AI_USAGE = {
                     "선점하지 못한 요청은 done이 될 때까지 짧게 폴링합니다. (app/services/menu_insights.py)"
                 ),
                 "failure": "실패하면 status='failed'로 남기고 다음 요청이 재시도합니다.",
+                "schemaChange": (
+                    "프롬프트에 항목이 추가되면(예: 영양 밸런스·검색어) 예전 스키마로 저장된 캐시에는 그 값이 "
+                    "없습니다. content에 필수 키가 빠져 있으면 그 학교×날짜에 대해 딱 한 번만 다시 생성하고, "
+                    "이후에는 다시 캐시를 사용합니다 — '내용이 바뀌었을 때만 재호출' 원칙을 그대로 따릅니다."
+                ),
             },
             "costControls": [
                 "학교×날짜당 정확히 1회만 호출하고 결과를 DB에 캐시",
-                "인기 메뉴·먹는 팁·건강 포인트를 한 번의 호출로 묶어 캐시 미스일 때도 호출 1회만 발생",
+                "먹는 팁·건강 포인트·영양 밸런스·검색어 네 가지를 한 번의 호출로 묶어 캐시 미스일 때도 호출 1회만 발생",
+                "가장 저렴한 모델(gemini-2.5-flash-lite)을 기본값으로 사용",
                 "출력 스키마를 고정해 재시도/재생성 낭비 방지",
                 "먹는 팁은 억지로 만들지 않도록 프롬프트에서 명시 — null 허용으로 불필요한 텍스트 생성 방지",
+                "먹방 영상의 1위 메뉴는 AI가 아니라 실제 유튜브 조회수로 정해, AI를 꼭 필요한 곳에만 사용",
             ],
+        },
+        {
+            "name": "유튜버들이 가장 추천하는 식사법 (/menu 페이지)",
+            "purpose": (
+                "그 날 메뉴로 찾은 유튜브 먹방 영상들의 제목·채널·설명을 AI가 읽고, 사람들이 실제로 "
+                "어떻게 먹는지를 요약합니다. 여러 영상에서 반복되는 방법은 그만큼 많이 먹는 방법이라는 "
+                "점을 이용해 '가장 추천하는 식사법' 하나를 앞세웁니다."
+            ),
+            "structuredOutput": {
+                "method": "response_mime_type='application/json' + Pydantic response_schema",
+                "schema": {
+                    "summary": "str — 영상 전체를 봤을 때 사람들이 이 메뉴들을 어떻게 즐겨 먹는지 2문장 이내",
+                    "top_method": (
+                        "{dish, method, how_to, why} | null — 여러 영상에서 반복돼 가장 많이 먹는다고 "
+                        "볼 수 있는 방법. 반복되는 게 없으면 null"
+                    ),
+                    "methods": "list[{dish, method, how_to, why}] — 그 밖에 확인되는 방법 최대 3개",
+                },
+                "reason": (
+                    "dish를 입력 메뉴 목록 안의 값으로만 인정하도록 서버에서 한 번 더 걸러, 프론트가 "
+                    "메뉴와 식사법을 항상 정확히 연결할 수 있게 했습니다."
+                ),
+            },
+            "callPolicy": {
+                "when": "그 학교의 그 날짜 /menu 페이지에서 영상을 처음 다 불러왔을 때",
+                "frequency": "학교 × 날짜 단위로 1회",
+                "cache": "video_eating_guides 테이블 (office_code + school_code + meal_date 유니크)",
+                "afterFirstCall": "이후 같은 학교·같은 날짜 방문자에게는 AI 호출 없이 DB 값을 그대로 반환",
+                "invalidation": (
+                    "video_hash(영상 제목 목록의 해시)가 달라졌을 때만 다시 생성합니다. 영상이 그대로면 "
+                    "며칠 뒤에 다시 들어와도 AI를 부르지 않습니다."
+                ),
+                "concurrency": (
+                    "menu_insights와 동일한 claim 패턴 — INSERT ... ON CONFLICT DO NOTHING 으로 "
+                    "status='pending'을 선점한 요청만 AI를 호출합니다. (app/services/video_guides.py)"
+                ),
+                "failure": "실패하면 status='failed'로 남기고 다음 요청이 재시도합니다.",
+            },
+            "costControls": [
+                "학교×날짜당 1회만 호출하고 결과를 DB에 캐시",
+                "영상 정보를 클라이언트에서 받지 않고 서버가 이미 캐시해 둔 youtube_caches에서 읽어 "
+                "입력을 서버가 통제 — 불필요하게 큰 프롬프트가 들어가지 않게 함",
+                "메뉴당 영상 3개, 설명은 300자까지만 프롬프트에 넣어 입력 토큰을 제한",
+                "가장 저렴한 모델(gemini-2.5-flash-lite)을 기본값으로 사용",
+                "영상이 하나도 없으면 AI를 아예 호출하지 않고 빈 결과를 반환",
+            ],
+            "honesty": (
+                "AI는 영상의 제목·설명만 읽을 수 있고 영상 내용을 직접 보지는 못합니다. 그래서 "
+                "'근거가 없는 내용은 지어내지 말라'고 프롬프트에서 강하게 제한했고, 화면에도 "
+                "'영상들의 제목과 설명을 AI가 읽고 정리했어요'라고 그대로 밝힙니다."
+            ),
         },
         {
             "name": "알레르기 보완 (/calendar 페이지)",
@@ -147,19 +220,62 @@ PROMPTS = {
         "inputs": ["오늘 급식 메뉴 이름 목록 (프론트가 NEIS 급식식단정보를 파싱한 결과)"],
         "template": (
             "오늘 학교 급식 메뉴는 다음과 같아:\n{메뉴 목록}\n\n"
-            "아래 세 가지를 알려줘.\n\n"
-            "1) favorite: 학생들이 가장 좋아할 만한 메뉴 하나\n"
-            "2) eatingTip: 더 맛있게 먹는 구체적인 방법 (괜찮은 게 없으면 절대 억지로 만들지 말고 null)\n"
-            "3) healthNotes: 몸의 어느 부분에 어떻게 도움이 되는지 1~4개, 아주 간단하게"
+            "아래 네 가지를 알려줘.\n\n"
+            "1) eatingTip: 더 맛있게 먹는 구체적인 방법 (괜찮은 게 없으면 절대 억지로 만들지 말고 null)\n"
+            "2) healthNotes: 몸의 어느 부분에 어떻게 도움이 되는지 1~4개, 아주 간단하게\n"
+            "3) balance: 영양 균형을 0~100점 + 한 줄 평 + 탄수화물/단백질/채소/칼슘/비타민별 충분·보통·부족\n"
+            "4) searchKeywords: 메뉴마다 유튜브에서 실제로 검색될 법한 짧은 음식 이름"
         ),
         # 실제 코드가 만드는 프롬프트를 그대로 렌더링한 예시 (문서와 코드가 어긋나지 않게)
         "renderedExample": build_menu_insights_prompt(_SAMPLE_DISHES),
         "designNotes": [
             "'절대 억지로 만들지 말고 eatingTip을 null로 둬' — 없는 꿀조합을 지어내지 않도록 명시적으로 제한",
+            "searchKeywords: NEIS 급식 표기는 '포크타코또띠아롤-', '달걀찜(실파)-'처럼 학교식 줄임말과 기호가 섞여 "
+            "있어 유튜브에서 거의 검색되지 않는다. AI가 이를 '타코', '달걀찜'처럼 사람들이 실제로 검색하는 이름으로 "
+            "바꿔주고, 목록에 없는 메뉴명을 지어내면 서버가 걸러낸다",
+            "balance: score를 '후하게 주지 말라'고 명시해 모든 급식이 90점대가 되는 것을 방지했고, group/level을 "
+            "Literal로 고정해 프론트가 색과 배지를 안전하게 매핑할 수 있게 함",
             "healthNotes의 body_part는 자유 텍스트가 아니라 고정된 13개 값(뇌/눈/목/심장/폐/위장/장/근육/뼈/혈액/피부/면역력/전신) "
             "중 하나로만 받도록 Pydantic Literal로 스키마를 제한 — 프론트의 인체 그림이 항상 정해진 좌표에 점을 찍을 수 있게 함",
-            "밥·김치처럼 매일 나오는 기본 메뉴보다 메인 요리를 우선하도록 명시해 매일 비슷한 답만 나오지 않게 유도",
-            "인기 메뉴·먹는 팁·건강 포인트 세 가지를 한 번의 호출로 묶어 방문당 AI 호출 횟수를 최소화",
+            "먹방 영상은 AI가 아니라 실제 유튜브 조회수로 고른다 — 메뉴마다 영상을 검색해 조회수 1위 메뉴를 "
+            "앞세우므로, 이 프롬프트에서 '인기 메뉴 고르기'는 제거했다 (AI는 꼭 필요한 곳에만 쓰기 위함)",
+            "먹는 팁·건강 포인트 두 가지를 한 번의 호출로 묶어 방문당 AI 호출 횟수를 최소화",
+        ],
+    },
+    "eatingMethods": {
+        "usedBy": "POST /meals/video-eating-guide (프론트 /menu 페이지, 학교×날짜당 1회 — 이후는 캐시)",
+        "builder": "app/services/ai_provider.py 의 build_eating_methods_prompt()",
+        "inputs": [
+            "메뉴별 유튜브 영상의 제목·채널·설명 (서버가 youtube_caches에 이미 저장해 둔 값)",
+        ],
+        "template": (
+            "아래는 오늘 학교 급식 메뉴별로 유튜브에서 찾은 먹방 영상들의 제목·채널·설명이야.\n"
+            "{메뉴별 영상 목록}\n\n"
+            "1) summary: 사람들이 이 메뉴들을 어떻게 즐겨 먹는지 두 문장 이내로 요약\n"
+            "2) topMethod: 여러 영상에서 반복되는 방법 = 가장 많이 먹는 방법 (없으면 null)\n"
+            "3) methods: 그 밖에 확인되는 방법 최대 3개\n"
+            "중요: 제목·설명만 볼 수 있으니 근거 없는 내용은 절대 지어내지 말 것"
+        ),
+        "renderedExample": build_eating_methods_prompt([
+            {
+                "dish": "감자고추장찌개",
+                "videos": [
+                    {
+                        "title": "감자고추장찌개 먹방 | 밥 두공기 순삭",
+                        "channelTitle": "먹방하는형",
+                        "description": "국물에 밥을 비벼 먹으면 진짜 최고입니다.",
+                    }
+                ],
+            }
+        ]),
+        "designNotes": [
+            "'여러 영상에서 반복해서 나오는 방법 = 사람들이 가장 많이 먹는 방법'이라는 판단 기준을 "
+            "프롬프트에 직접 적어, 단순 요약이 아니라 '가장 추천하는 방법'을 고르게 했다",
+            "AI가 영상 내용을 직접 볼 수 없다는 한계를 프롬프트에 명시하고 '지어내지 말라'고 제한 — "
+            "화면에도 제목·설명 기반임을 그대로 표시한다",
+            "'급식에서 구하기 어려운 재료는 추천하지 말라'고 제한해 학생이 실제로 따라 할 수 있는 "
+            "방법만 나오게 했다",
+            "반복되는 방법이 없으면 topMethod를 null로 두게 해서, 억지 추천을 만들지 않는다",
         ],
     },
     "allergenNotes": {

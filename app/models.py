@@ -156,6 +156,37 @@ class SchoolMealLike(Base):
     )
 
 
+class VideoEatingGuide(Base):
+    """학교 × 날짜별 '유튜버들이 가장 추천하는 식사법' 캐시 (/menu 페이지).
+
+    그 날 메뉴로 찾은 유튜브 먹방 영상들의 제목·설명을 AI가 읽고, 사람들이 실제로
+    어떻게 먹는지를 정리한다. 여러 유튜버가 똑같이 말하는 방법일수록 '가장 추천하는
+    식사법'으로 앞에 세운다.
+
+    video_hash로 영상 목록이 바뀌었는지 감지한다 — 영상이 그대로면 같은 학교·같은
+    날짜에 다시 들어와도 AI를 재호출하지 않는다. status로 동시 요청의 중복 AI 호출을
+    막는다 (app/services/video_guides.py 참고):
+    pending(생성 중) → done(캐시 완료) / failed(재시도 가능).
+    """
+    __tablename__ = "video_eating_guides"
+    __table_args__ = (
+        UniqueConstraint("office_code", "school_code", "meal_date", name="uq_video_eating_guides_code_date"),
+    )
+
+    id: Mapped[int]            = mapped_column(Integer, primary_key=True)
+    office_code: Mapped[str]   = mapped_column(String(10), nullable=False, index=True)
+    school_code: Mapped[str]   = mapped_column(String(10), nullable=False, index=True)
+    meal_date: Mapped[date]    = mapped_column(Date, nullable=False, index=True)
+    video_hash: Mapped[str]    = mapped_column(String(64), nullable=False)
+    status: Mapped[str]        = mapped_column(String(10), nullable=False, default="pending")
+    content: Mapped[dict]      = mapped_column(JSON, nullable=True)
+    model: Mapped[str]         = mapped_column(String(50), nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class MenuVote(Base):
     """메뉴 투표 카운터 — 투표 페이지가 '이번 주' 기준이므로 주 단위로 집계한다."""
     __tablename__ = "menu_votes"

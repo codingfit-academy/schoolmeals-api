@@ -108,6 +108,9 @@ def _serialize(item: dict) -> dict:
         "videoId": video_id,
         "title": snippet.get("title", ""),
         "channelTitle": snippet.get("channelTitle", ""),
+        # 설명은 videos.list 응답에 이미 들어있어 추가 할당량 없이 저장할 수 있다.
+        # AI가 "사람들이 이 음식을 어떻게 먹는지" 정리할 때 제목보다 훨씬 좋은 근거가 된다.
+        "description": (snippet.get("description") or "")[:400],
         "thumbnail": thumb.get("url", ""),
         "duration": _format_duration(item.get("contentDetails", {}).get("duration", "")),
         "views": _format_views(item.get("statistics", {}).get("viewCount")),

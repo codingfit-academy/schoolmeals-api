@@ -35,9 +35,24 @@ class AIProvider(ABC):
 
     @abstractmethod
     async def analyze_menu(self, dishes: list[str]) -> dict:
-        """오늘 급식 메뉴를 한 번의 호출로 분석해 인기 메뉴 / 먹는 팁(있을 때만) / 건강 포인트를 함께 반환한다.
-        여러 번 나눠 호출하지 않고 하나로 묶는 이유는 AI 호출 비용을 최소화하기 위함이다.
-        반환 형태: {"favorite": str, "eatingTip": {"dish": str, "tip": str} | None, "healthNotes": [{"bodyPart": str, "note": str}]}
+        """오늘 급식 메뉴를 한 번의 호출로 분석해 먹는 팁 / 건강 포인트 / 영양 밸런스 /
+        유튜브 검색어를 함께 반환한다. 네 가지를 한 호출로 묶는 이유는 AI 호출 비용을 최소화하기 위함이다.
+        반환 형태: {
+            "eatingTip": {"dish": str, "tip": str} | None,
+            "healthNotes": [{"bodyPart": str, "note": str}],
+            "balance": {"score": int, "summary": str, "groups": [{"group": str, "level": str}]},
+            "searchKeywords": [{"dish": str, "keyword": str}],
+        }
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def summarize_eating_methods(self, dish_videos: list[dict]) -> dict:
+        """그 날 메뉴로 찾은 유튜브 먹방 영상들(제목·채널·설명)을 읽고, 사람들이 실제로 어떻게
+        먹는지를 정리한다. 여러 영상에서 반복되는 방법일수록 많이 먹는 방법이므로 가장 앞에 세운다.
+        입력: [{"dish": str, "videos": [{"title": str, "channelTitle": str, "description": str}]}]
+        반환: {"summary": str, "topMethod": {"dish", "method", "howTo", "why"} | None,
+               "methods": [{"dish", "method", "howTo", "why"}]}
         """
         raise NotImplementedError
 
@@ -60,9 +75,17 @@ class StubAIProvider(AIProvider):
 
     async def analyze_menu(self, dishes: list[str]) -> dict:
         logger.info("StubAIProvider: 더미 메뉴 분석 - %s", dishes)
-        # 밥류(첫 번째 메뉴)는 보통 매일 나오는 기본 메뉴라 피하는 정도의 아주 단순한 휴리스틱
-        favorite = dishes[1] if len(dishes) > 1 else dishes[0]
-        return {"favorite": favorite, "eatingTip": None, "healthNotes": []}
+        # 검색어는 메뉴 이름을 그대로 쓰는 것이 AI 없는 상태의 자연스러운 폴백이다.
+        return {
+            "eatingTip": None,
+            "healthNotes": [],
+            "balance": None,
+            "searchKeywords": [{"dish": d, "keyword": d} for d in dishes],
+        }
+
+    async def summarize_eating_methods(self, dish_videos: list[dict]) -> dict:
+        logger.info("StubAIProvider: 더미 식사법 요약 - %d개 메뉴", len(dish_videos))
+        return {"summary": "", "topMethod": None, "methods": []}
 
     async def suggest_allergens(self, days: list[dict]) -> dict:
         logger.info("StubAIProvider: 더미 알레르기 보완 - %d일", len(days))
@@ -86,10 +109,32 @@ class _HealthNote(BaseModel):
     note: str
 
 
+# 영양 밸런스 카드에 쓰는 고정 값들 — 프론트가 색/아이콘을 매핑할 수 있게 자유 텍스트를 막는다.
+BALANCE_GROUPS: tuple[str, ...] = ("탄수화물", "단백질", "채소", "칼슘", "비타민")
+BALANCE_LEVELS: tuple[str, ...] = ("충분", "보통", "부족")
+
+
+class _BalanceGroup(BaseModel):
+    group: Literal[BALANCE_GROUPS]
+    level: Literal[BALANCE_LEVELS]
+
+
+class _Balance(BaseModel):
+    score: int
+    summary: str
+    groups: list[_BalanceGroup]
+
+
+class _DishKeyword(BaseModel):
+    dish: str
+    keyword: str
+
+
 class _MenuInsights(BaseModel):
-    favorite: str
     eating_tip: _EatingTip | None
     health_notes: list[_HealthNote]
+    balance: _Balance
+    search_keywords: list[_DishKeyword]
 
 
 # 프론트(utils/parseMeal.js ALLERGENS)와 동일한 19개 NEIS 표준 알레르기 유발식품 키.
@@ -98,6 +143,19 @@ ALLERGEN_KEYS: tuple[str, ...] = (
     "egg", "dairy", "buckwheat", "peanut", "soy", "wheat", "mackerel", "crab", "shrimp",
     "pork", "peach", "tomato", "sulfite", "walnut", "chicken", "beef", "squid", "shellfish", "pinenut",
 )
+
+
+class _EatingMethod(BaseModel):
+    dish: str
+    method: str
+    how_to: str
+    why: str
+
+
+class _EatingMethods(BaseModel):
+    summary: str
+    top_method: _EatingMethod | None
+    methods: list[_EatingMethod]
 
 
 class _AllergenGuess(BaseModel):
@@ -116,20 +174,66 @@ class _AllergenNotes(BaseModel):
 
 
 def build_menu_insights_prompt(dishes: list[str]) -> str:
-    """provider와 무관한 '오늘의 메뉴 분석' 프롬프트 — 인기 메뉴/먹는 팁/건강 포인트를 한 번에 요청한다."""
+    """provider와 무관한 '오늘의 메뉴 분석' 프롬프트 — 먹는 팁 / 건강 포인트 /
+    영양 밸런스 / 유튜브 검색어를 한 번에 요청한다 (호출 1회로 묶기 위함)."""
     dish_lines = "\n".join(f"- {d}" for d in dishes)
     return (
         "오늘 학교 급식 메뉴는 다음과 같아:\n"
         f"{dish_lines}\n\n"
-        "아래 세 가지를 알려줘.\n\n"
-        "1) favorite: 이 중 초·중·고 학생들이 가장 좋아할 만한 메뉴 하나. 밥이나 김치처럼 매일 나오는 "
-        "기본 메뉴보다는 고기, 튀김, 분식류 같은 메인 요리를 우선 고려하고, 목록에 있는 표기를 그대로 사용해줘.\n\n"
-        "2) eatingTip: 이 메뉴들을 더 맛있게 먹는 아주 구체적이고 실용적인 조합이나 방법이 하나 있다면 "
+        "아래 네 가지를 알려줘.\n\n"
+        "1) eatingTip: 이 메뉴들을 더 맛있게 먹는 아주 구체적이고 실용적인 조합이나 방법이 하나 있다면 "
         "(예: 'OO에 마요네즈를 살짝 곁들이면 더 맛있어요') 알려줘. 정말 괜찮은 게 떠오르지 않으면 "
         "절대 억지로 만들지 말고 eatingTip을 null로 둬.\n\n"
-        "3) healthNotes: 이 급식이 학생 몸에 어떻게 도움이 되는지 1~4개만 아주 간단하게 알려줘 "
+        "2) healthNotes: 이 급식이 학생 몸에 어떻게 도움이 되는지 1~4개만 아주 간단하게 알려줘 "
         "(예: '뼈: 칼슘이 들어있어 뼈 건강에 도움을 줘요'). 영양학적으로 엄밀할 필요는 없고, 학생이 "
-        "이해하기 쉬운 수준으로 짧게 적어줘."
+        "이해하기 쉬운 수준으로 짧게 적어줘.\n\n"
+        "3) balance: 오늘 급식 한 끼의 영양 균형을 0~100점 사이 점수(score)와 초등학생도 이해할 수 있는 "
+        "한 줄 평(summary)으로 알려줘. groups에는 탄수화물/단백질/채소/칼슘/비타민 중 이 급식에서 판단할 수 "
+        "있는 것만 골라 '충분/보통/부족' 중 하나로 표시해줘. 점수는 후하게 주지 말고 실제 구성에 맞게 매겨줘.\n\n"
+        "4) searchKeywords: 각 메뉴를 유튜브에서 '먹방' 영상으로 검색할 때 쓸 짧은 검색어를 메뉴마다 하나씩 "
+        "알려줘. 급식 표기에는 학교식 줄임말이나 '-', 괄호가 섞여 있으니(예: '포크타코또띠아롤-' → '타코', "
+        "'달걀찜(실파)-' → '달걀찜', '친환경쌀밥' → '쌀밥') 사람들이 유튜브에서 실제로 검색할 법한 음식 "
+        "이름으로 다듬어줘. 검색어에 '먹방'은 붙이지 말고 음식 이름만 적고, dish에는 위 메뉴 목록의 표기를 "
+        "그대로 써줘."
+    )
+
+
+def build_eating_methods_prompt(dish_videos: list[dict]) -> str:
+    """provider와 무관한 '유튜버들이 가장 추천하는 식사법' 프롬프트.
+
+    유튜브 영상의 제목·채널·설명만 근거로 삼는다(영상 내용을 직접 보는 것이 아니므로,
+    근거가 부족하면 지어내지 말라고 강하게 제한한다). 여러 영상에서 반복되는 방법일수록
+    실제로 많이 먹는 방법이라는 점을 명시해 topMethod를 고르게 한다."""
+    blocks = []
+    for item in dish_videos:
+        blocks.append(f"[{item['dish']}]")
+        for video in item["videos"]:
+            blocks.append(f"- 제목: {video.get('title', '')}")
+            channel = video.get("channelTitle")
+            if channel:
+                blocks.append(f"  채널: {channel}")
+            description = (video.get("description") or "").strip().replace("\n", " ")
+            if description:
+                blocks.append(f"  설명: {description[:300]}")
+    listing = "\n".join(blocks)
+
+    return (
+        "아래는 오늘 학교 급식 메뉴별로 유튜브에서 찾은 먹방 영상들의 제목·채널·설명이야.\n\n"
+        f"{listing}\n\n"
+        "이 영상들을 근거로 사람들이 이 음식들을 '어떻게 먹는지' 정리해줘.\n\n"
+        "1) summary: 영상들을 전체적으로 봤을 때 사람들이 이 급식 메뉴들을 어떻게 즐겨 먹는지 "
+        "두 문장 이내로 요약해줘.\n\n"
+        "2) topMethod: 여러 영상에서 반복해서 나오는 먹는 방법이 있다면 그게 사람들이 가장 많이 "
+        "먹는 방법이야. 그중 학생이 급식에서 따라 할 수 있는 걸 하나만 골라줘. "
+        "method는 '밥에 비벼 먹기'처럼 짧은 이름, howTo는 따라 하는 방법을 한두 문장으로, "
+        "why는 왜 이렇게 먹는지(여러 영상에서 반복된다는 점 포함)를 한 문장으로 써줘. "
+        "반복되는 방법이 전혀 없으면 억지로 만들지 말고 topMethod를 null로 둬.\n\n"
+        "3) methods: 그 밖에 영상에서 확인되는 먹는 방법을 최대 3개까지 같은 형식으로 알려줘. "
+        "확실하지 않으면 개수를 줄여도 되고, 없으면 빈 배열로 둬.\n\n"
+        "중요: 너는 영상의 제목·설명만 볼 수 있고 실제 영상 내용은 볼 수 없어. 근거가 없는 "
+        "내용은 절대 지어내지 말고, dish에는 위 목록에 있는 메뉴 이름을 그대로 써줘. "
+        "급식에서 구하기 어려운 재료(예: 특별한 소스, 비싼 재료)는 추천하지 말고, 학교에서 "
+        "받은 급식만으로 따라 할 수 있는 방법을 우선해줘."
     )
 
 
@@ -181,7 +285,19 @@ class GeminiAIProvider(AIProvider):
             ),
         )
         parsed: _MenuInsights = response.parsed
-        return _serialize_menu_insights(parsed, dishes, "Gemini")
+        return _serialize_menu_insights(parsed, dishes)
+
+    async def summarize_eating_methods(self, dish_videos: list[dict]) -> dict:
+        response = await self._client.aio.models.generate_content(
+            model=self._model,
+            contents=build_eating_methods_prompt(dish_videos),
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": _EatingMethods,
+            },
+        )
+        parsed: _EatingMethods = response.parsed
+        return _serialize_eating_methods(parsed, dish_videos)
 
     async def suggest_allergens(self, days: list[dict]) -> dict:
         response = await self._client.aio.models.generate_content(
@@ -211,7 +327,17 @@ class ClaudeAIProvider(AIProvider):
             output_format=_MenuInsights,
         )
         parsed: _MenuInsights = response.parsed_output
-        return _serialize_menu_insights(parsed, dishes, "Claude")
+        return _serialize_menu_insights(parsed, dishes)
+
+    async def summarize_eating_methods(self, dish_videos: list[dict]) -> dict:
+        response = await self._client.messages.parse(
+            model=self._model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": build_eating_methods_prompt(dish_videos)}],
+            output_format=_EatingMethods,
+        )
+        parsed: _EatingMethods = response.parsed_output
+        return _serialize_eating_methods(parsed, dish_videos)
 
     async def suggest_allergens(self, days: list[dict]) -> dict:
         response = await self._client.messages.parse(
@@ -224,11 +350,7 @@ class ClaudeAIProvider(AIProvider):
         return _serialize_allergen_notes(parsed, days)
 
 
-def _serialize_menu_insights(parsed: "_MenuInsights", dishes: list[str], provider_label: str) -> dict:
-    favorite = parsed.favorite if parsed.favorite in dishes else dishes[0]
-    if parsed.favorite not in dishes:
-        logger.warning("%s가 목록 밖의 메뉴를 반환해 첫 메뉴로 대체합니다: %s (목록: %s)", provider_label, parsed.favorite, dishes)
-
+def _serialize_menu_insights(parsed: "_MenuInsights", dishes: list[str]) -> dict:
     eating_tip = (
         {"dish": parsed.eating_tip.dish, "tip": parsed.eating_tip.tip}
         if parsed.eating_tip
@@ -236,7 +358,40 @@ def _serialize_menu_insights(parsed: "_MenuInsights", dishes: list[str], provide
     )
     health_notes = [{"bodyPart": n.body_part, "note": n.note} for n in parsed.health_notes]
 
-    return {"favorite": favorite, "eatingTip": eating_tip, "healthNotes": health_notes}
+    balance = {
+        "score": max(0, min(100, parsed.balance.score)),
+        "summary": parsed.balance.summary,
+        "groups": [{"group": g.group, "level": g.level} for g in parsed.balance.groups],
+    }
+
+    # 목록에 없는 메뉴로 검색어를 만들어오면 프론트가 매칭할 수 없으므로 버리고,
+    # 빠진 메뉴는 프론트가 원래 메뉴 이름으로 검색하도록 둔다.
+    known_dishes = set(dishes)
+    search_keywords = [
+        {"dish": k.dish, "keyword": k.keyword.strip()}
+        for k in parsed.search_keywords
+        if k.dish in known_dishes and k.keyword.strip()
+    ]
+
+    return {
+        "eatingTip": eating_tip,
+        "healthNotes": health_notes,
+        "balance": balance,
+        "searchKeywords": search_keywords,
+    }
+
+
+def _serialize_eating_methods(parsed: "_EatingMethods", dish_videos: list[dict]) -> dict:
+    known_dishes = {item["dish"] for item in dish_videos}
+
+    def to_dict(method: "_EatingMethod | None") -> dict | None:
+        # 목록에 없는 메뉴를 지어냈으면 프론트가 연결할 곳이 없으므로 버린다.
+        if method is None or method.dish not in known_dishes:
+            return None
+        return {"dish": method.dish, "method": method.method, "howTo": method.how_to, "why": method.why}
+
+    methods = [m for m in (to_dict(x) for x in parsed.methods) if m]
+    return {"summary": parsed.summary, "topMethod": to_dict(parsed.top_method), "methods": methods}
 
 
 def _serialize_allergen_notes(parsed: "_AllergenNotes", days: list[dict]) -> dict:
